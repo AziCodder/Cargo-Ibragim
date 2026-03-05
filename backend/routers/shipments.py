@@ -9,6 +9,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 from backend.database import get_db, row_to_shipment
+from backend.logging_config import get_logger
 from backend.models import ShipmentCreate, ShipmentUpdate, ShipmentResponse, Status
 from backend.services.telegram_service import (
     send_dispatch_notification,
@@ -17,6 +18,7 @@ from backend.services.telegram_service import (
 )
 
 router = APIRouter(prefix="/api/shipments", tags=["shipments"])
+log = get_logger("shipments")
 UPLOADS_DIR = Path(__file__).parent.parent / "uploads"
 
 
@@ -181,6 +183,7 @@ async def create_shipment(data: ShipmentCreate):
             ),
         )
 
+    log.info("Создана накладная id=%s tracking=%s", shipment_id, data.tracking or "")
     return _get_shipment_by_id(shipment_id)
 
 
@@ -234,6 +237,7 @@ def update_shipment(shipment_id: str, data: ShipmentUpdate):
             (title, tracking, product_list, notes, dispatch_date, delivery_date, status, shipping_type,
              weight, amount_to_pay, cashback, calculated, client_id, client_phone, shipment_id),
         )
+    log.info("Обновлена накладная id=%s", shipment_id)
     return _get_shipment_by_id(shipment_id)
 
 
@@ -248,9 +252,11 @@ def notify_dispatch(shipment_id: str):
         )
     ok = send_dispatch_notification(s)
     if not ok:
+        log.warning("notify_dispatch: не удалось отправить уведомление shipment_id=%s", shipment_id)
         raise HTTPException(status_code=500, detail="Не удалось отправить уведомление")
     with get_db() as conn:
         conn.execute("UPDATE shipments SET dispatch_notified = 1 WHERE id = ?", (shipment_id,))
+    log.info("Уведомление об отправке отправлено shipment_id=%s chat_id=%s", shipment_id, chat_id)
     return {"ok": True}
 
 
@@ -269,9 +275,11 @@ def notify_delivery(shipment_id: str):
         )
     ok = send_delivery_notification(s)
     if not ok:
+        log.warning("notify_delivery: не удалось отправить уведомление shipment_id=%s", shipment_id)
         raise HTTPException(status_code=500, detail="Не удалось отправить уведомление")
     with get_db() as conn:
         conn.execute("UPDATE shipments SET delivery_notified = 1 WHERE id = ?", (shipment_id,))
+    log.info("Уведомление о доставке отправлено shipment_id=%s chat_id=%s", shipment_id, chat_id)
     return {"ok": True}
 
 
@@ -301,6 +309,7 @@ def delete_shipment(shipment_id: str):
         shutil.rmtree(upload_dir)
     with get_db() as conn:
         conn.execute("DELETE FROM shipments WHERE id = ?", (shipment_id,))
+    log.info("Накладная удалена id=%s", shipment_id)
     return None
 
 

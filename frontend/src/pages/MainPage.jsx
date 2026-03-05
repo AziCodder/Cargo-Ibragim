@@ -82,9 +82,11 @@ export default function MainPage() {
     <>
       <NavBar />
       <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem', flexWrap: 'wrap' }}>
-        <button className="btn" onClick={handleBackup} disabled={backupLoading}>
-          {backupLoading ? '...' : 'Резервная копия'}
-        </button>
+        {!s3Configured && (
+          <button className="btn" onClick={handleBackup} disabled={backupLoading} title="Локальная копия (когда S3 не настроен)">
+            {backupLoading ? '...' : 'Резервная копия'}
+          </button>
+        )}
         {s3Configured && (
           <button className="btn" onClick={handleS3Backup} disabled={s3Loading} title="Загрузить в S3 (Hostkey)">
             {s3Loading ? '...' : 'Бэкап в S3'}

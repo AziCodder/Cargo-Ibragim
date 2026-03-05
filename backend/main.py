@@ -10,12 +10,18 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from backend.database import init_db, get_db_path
 from backend.routers import shipments, backup, clients, admin
+from backend.logging_config import setup_logging, get_logger
+
+# Логирование для сайта (backend)
+setup_logging()
+log = get_logger()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Backend started. Clients API: /api/clients, /api/clients/register")
+    log.info("Backend started. Clients API: /api/clients, /api/clients/register")
     yield
-    print("Backend shutting down...")
+    log.info("Backend shutting down...")
 
 app = FastAPI(title="Cargo Tracking API", lifespan=lifespan)
 
@@ -29,12 +35,14 @@ def _auto_backup():
         from backend.services.s3_backup import upload_auto_backup_to_s3, is_s3_configured
         if is_s3_configured():
             upload_auto_backup_to_s3()
+            log.debug("Auto backup: uploaded to S3")
             return
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("Auto backup S3 failed: %s", e)
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     dest = BACKUPS_DIR / AUTO_BACKUP_FILENAME
     shutil.copy2(get_db_path(), dest)
+    log.debug("Auto backup: saved to %s", dest)
 
 
 scheduler = BackgroundScheduler()

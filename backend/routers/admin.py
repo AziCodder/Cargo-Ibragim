@@ -1,6 +1,7 @@
 """
 Админ-эндпоинт: полное удаление всех данных и кода проекта (только по секрету).
 Вызывается ботом после подтверждения пользователем с id 1338143348.
+Эндпоинт /logs — выдача файла логов сайта (для того же пользователя через бота).
 """
 import os
 import subprocess
@@ -9,10 +10,13 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import PlainTextResponse
 
 from backend.database import get_db_path
+from backend.logging_config import get_logger, SITE_LOG_FILE
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+log = get_logger("admin")
 
 # Корень проекта (backend/routers/admin.py -> backend -> корень)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -22,15 +26,38 @@ def _get_secret() -> str:
     return (os.getenv("DELETE_ALL_SECRET") or "").strip()
 
 
+def _check_admin_secret(x_admin_secret: str | None) -> bool:
+    secret = _get_secret()
+    return bool(secret and x_admin_secret == secret)
+
+
+@router.get("/logs", response_class=PlainTextResponse)
+def get_site_logs(x_admin_secret: str | None = Header(None, alias="X-Admin-Secret")):
+    """
+    Возвращает содержимое файла логов сайта (site.log).
+    Доступ только с заголовком X-Admin-Secret. Вызывается ботом по команде /logs для user 1338143348.
+    """
+    if not _check_admin_secret(x_admin_secret):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+    if not SITE_LOG_FILE.exists():
+        return "# Лог-файл сайта ещё не создан.\n"
+    try:
+        return SITE_LOG_FILE.read_text(encoding="utf-8")
+    except Exception as e:
+        log.exception("Ошибка чтения логов: %s", e)
+        raise HTTPException(status_code=500, detail="Ошибка чтения логов")
+
+
 @router.post("/delete-all-project")
 def delete_all_project(x_admin_secret: str | None = Header(None, alias="X-Admin-Secret")):
     """
     Полное удаление: S3, БД, весь код проекта (включая этот).
     Вызывается только ботом с заголовком X-Admin-Secret после подтверждения пользователем.
     """
-    secret = _get_secret()
-    if not secret or x_admin_secret != secret:
+    if not _check_admin_secret(x_admin_secret):
         raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+    log.warning("delete_all_project: запрос на полное удаление выполнен")
 
     try:
         # 1) Очистить всё хранилище S3
