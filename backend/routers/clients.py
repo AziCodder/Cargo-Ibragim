@@ -5,9 +5,11 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.database import get_db, row_to_client
+from backend.logging_config import get_logger
 from backend.models import ClientCreate, ClientUpdate, ClientResponse
 
 router = APIRouter(prefix="/api/clients", tags=["clients"])
+log = get_logger("clients")
 
 
 def _get_client(client_id: str) -> dict:
@@ -50,6 +52,7 @@ def register_client(data: ClientRegister):
                VALUES (?, ?, ?, ?, ?, ?)""",
             (client_id, data.full_name, data.city, data.telegram_chat_id, None, created_at),
         )
+    log.info("Зарегистрирован клиент id=%s telegram_chat_id=%s", client_id, data.telegram_chat_id)
     return _get_client(client_id)
 
 

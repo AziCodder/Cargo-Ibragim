@@ -10,6 +10,7 @@ __pycache__/
 # Backend
 backend/backups/
 backend/uploads/
+logs/
 *.db
 
 # Frontend

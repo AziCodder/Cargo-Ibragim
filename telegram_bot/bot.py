@@ -1,6 +1,8 @@
+import logging
 import os
 import re
 import sys
+from io import BytesIO
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -25,10 +27,23 @@ load_dotenv(_env_path)
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 API_BASE = os.getenv("API_BASE_URL", "http://localhost:8800")
 
-# Только этот пользователь может вызвать /delete_all_project
+# Только этот пользователь может вызвать /delete_all_project и /logs
 ALLOWED_DELETE_USER_ID = 1338143348
 
+# Логирование бота: файл logs/bot.log в корне проекта
+PROJECT_ROOT = Path(__file__).parent.parent
+LOGS_DIR = PROJECT_ROOT / "logs"
+BOT_LOG_FILE = LOGS_DIR / "bot.log"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+_log_handler = logging.FileHandler(BOT_LOG_FILE, encoding="utf-8")
+_log_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+log = logging.getLogger("bot")
+log.setLevel(logging.DEBUG)
+if not log.handlers:
+    log.addHandler(_log_handler)
+
 if not BOT_TOKEN:
+    log.critical("TELEGRAM_BOT_TOKEN не найден. Создайте файл .env в корне проекта.")
     print("Ошибка: TELEGRAM_BOT_TOKEN не найден. Создайте файл .env в корне проекта.")
     sys.exit(1)
 
@@ -46,11 +61,14 @@ SHIPPING_LABELS = {"1_7_days": "1-7 дней", "15_20_days": "15-20 дней", "
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
+    user_id = update.effective_user.id if update.effective_user else None
+    log.info("/start chat_id=%s user_id=%s", chat_id, user_id)
     try:
         async with httpx.AsyncClient() as client:
             r = await client.get(f"{API_BASE}/api/clients/by-telegram/{chat_id}")
             if r.status_code == 200:
                 data = r.json()
+                log.info("Пользователь уже зарегистрирован chat_id=%s", chat_id)
                 await update.message.reply_text(
                     f"✅ Вы уже зарегистрированы!\n\n"
                     f"ФИО: {data.get('full_name', '')}\n"
@@ -60,10 +78,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     reply_markup=REPLY_KEYBOARD,
                 )
                 return ConversationHandler.END
-    except httpx.ConnectError:
-        pass
-    except Exception:
-        pass
+    except httpx.ConnectError as e:
+        log.warning("Backend недоступен при /start chat_id=%s: %s", chat_id, e)
+    except Exception as e:
+        log.exception("Ошибка при /start chat_id=%s: %s", chat_id, e)
 
     await update.message.reply_text(
         "👋 Добро пожаловать!\n\n"
@@ -103,6 +121,7 @@ async def reg_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             r.raise_for_status()
             data = r.json()
+        log.info("Регистрация успешна chat_id=%s client_id=%s", chat_id, data.get("id"))
         await update.message.reply_text(
             f"✅ Регистрация завершена!\n\n"
             f"Ваш ID: <code>{data['id']}</code>\n"
@@ -114,7 +133,8 @@ async def reg_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML",
             reply_markup=REPLY_KEYBOARD,
         )
-    except httpx.ConnectError:
+    except httpx.ConnectError as e:
+        log.warning("Backend недоступен при регистрации chat_id=%s: %s", chat_id, e)
         await update.message.reply_text(
             "Ошибка: не удалось подключиться к серверу.\n\n"
             "Запустите backend из корня проекта:\n"
@@ -123,6 +143,7 @@ async def reg_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Или дважды кликните run_backend.bat"
         )
     except Exception as e:
+        log.exception("Ошибка регистрации chat_id=%s: %s", chat_id, e)
         await update.message.reply_text(f"Ошибка регистрации: {e}")
     context.user_data.clear()
     return ConversationHandler.END
@@ -274,9 +295,12 @@ async def handle_intransit_button(update: Update, context: ContextTypes.DEFAULT_
         text = _build_intransit_text(slice_, total_count, total_sum, page, total_pages)
         keyboard = _build_intransit_keyboard(slice_, page, total_pages)
         await update.message.reply_text(text, reply_markup=keyboard)
-    except httpx.ConnectError:
+        log.debug("Список в дороге показан chat_id=%s count=%s", chat_id, total_count)
+    except httpx.ConnectError as e:
+        log.warning("Backend недоступен (в дороге) chat_id=%s: %s", chat_id, e)
         await update.message.reply_text("Ошибка: backend не запущен.")
     except Exception as e:
+        log.exception("Ошибка при показе в дороге chat_id=%s: %s", chat_id, e)
         await update.message.reply_text(f"Ошибка: {e}")
 
 
@@ -351,9 +375,12 @@ async def handle_tracking_search(update: Update, context: ContextTypes.DEFAULT_T
         msg_text = _build_intransit_text(slice_, total_count, total_sum, 1, 1)
         keyboard = _build_intransit_keyboard(slice_, 1, 1)
         await update.message.reply_text(msg_text, reply_markup=keyboard)
-    except httpx.ConnectError:
+        log.debug("Поиск по трекингу chat_id=%s tracking=%s", chat_id, text)
+    except httpx.ConnectError as e:
+        log.warning("Backend недоступен (трекинг) chat_id=%s: %s", chat_id, e)
         await update.message.reply_text("Ошибка: backend не запущен.")
     except Exception as e:
+        log.exception("Ошибка поиска по трекингу chat_id=%s: %s", chat_id, e)
         await update.message.reply_text(f"Ошибка: {e}")
 
 
@@ -414,6 +441,50 @@ async def cmd_arriving_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка: {e}")
 
 
+async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /logs — только для user 1338143348. Отправляет два файла: логи бота и логи сайта."""
+    user_id = update.effective_user.id if update.effective_user else None
+    if user_id != ALLOWED_DELETE_USER_ID:
+        log.warning("/logs вызван пользователем без доступа user_id=%s", user_id)
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+    log.info("/logs запрошены user_id=%s", user_id)
+    try:
+        # 1) Файл логов бота
+        if BOT_LOG_FILE.exists():
+            bot_content = BOT_LOG_FILE.read_text(encoding="utf-8")
+            await update.message.reply_document(
+                document=BytesIO(bot_content.encode("utf-8")),
+                filename="bot_logs.txt",
+                caption="📋 Логи бота",
+            )
+        else:
+            await update.message.reply_text("Файл логов бота ещё не создан (bot_logs.txt).")
+        # 2) Логи сайта с API
+        secret = (os.getenv("DELETE_ALL_SECRET") or "").strip()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(
+                f"{API_BASE}/api/admin/logs",
+                headers={"X-Admin-Secret": secret} if secret else {},
+            )
+        if r.status_code == 200:
+            site_content = r.text
+            await update.message.reply_document(
+                document=BytesIO(site_content.encode("utf-8")),
+                filename="site_logs.txt",
+                caption="📋 Логи сайта (backend)",
+            )
+        else:
+            await update.message.reply_text(f"Не удалось получить логи сайта: {r.status_code}. Проверьте backend и DELETE_ALL_SECRET.")
+            log.warning("GET /api/admin/logs вернул %s", r.status_code)
+    except httpx.ConnectError as e:
+        log.warning("Backend недоступен при /logs: %s", e)
+        await update.message.reply_text("Ошибка: backend не запущен. Логи сайта недоступны.")
+    except Exception as e:
+        log.exception("Ошибка при отправке логов: %s", e)
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 async def cmd_delete_all_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /delete_all_project — только для пользователя с id 1338143348."""
     user_id = update.effective_user.id if update.effective_user else None
@@ -468,6 +539,7 @@ async def handle_delete_all_callback(update: Update, context: ContextTypes.DEFAU
 
 
 def main():
+    log.info("Запуск бота API=%s", API_BASE)
     print("Запуск бота...")
     print(f"API: {API_BASE}")
 
@@ -491,6 +563,7 @@ def main():
         .build()
     )
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("delete_all_project", cmd_delete_all_project))
     app.add_handler(CommandHandler("intransit", cmd_intransit))
     app.add_handler(CommandHandler("arriving_week", cmd_arriving_week))
@@ -498,6 +571,7 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
     app.add_handler(CallbackQueryHandler(handle_intransit_callback))
 
+    log.info("Бот запущен")
     print("Бот запущен. Отправьте /start в Telegram.")
     app.run_polling(drop_pending_updates=True)
 
