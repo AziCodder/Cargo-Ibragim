@@ -1,0 +1,23 @@
+# Секреты и конфиг (не выкладывать на публичный репозиторий)
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Backend
+backend/backups/
+backend/uploads/
+*.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
