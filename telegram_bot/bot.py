@@ -13,6 +13,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -47,7 +48,15 @@ if not BOT_TOKEN:
     print("Ошибка: TELEGRAM_BOT_TOKEN не найден. Создайте файл .env в корне проекта.")
     sys.exit(1)
 
-REG_NAME, REG_CITY = 1, 2
+# ---------------------------------------------------------------------------
+# Состояния ConversationHandler
+# ---------------------------------------------------------------------------
+
+# Регистрация нового клиента (/start)
+REG_NAME, REG_CITY = 0, 1
+
+# Вход по логину/паролю (/login — для администраторов и существующих пользователей)
+LOGIN_USERNAME, LOGIN_PASSWORD = 10, 11
 
 # Кнопка под строкой ввода (reply keyboard)
 INTRANSIT_BTN = "Товар в дороге"
@@ -59,111 +68,257 @@ REPLY_KEYBOARD = ReplyKeyboardMarkup(
 SHIPPING_LABELS = {"1_7_days": "1-7 дней", "15_20_days": "15-20 дней", "20_30_days": "20-30 дней"}
 
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    user_id = update.effective_user.id if update.effective_user else None
-    log.info("/start chat_id=%s user_id=%s", chat_id, user_id)
+# ---------------------------------------------------------------------------
+# Helpers: Bot session API
+# ---------------------------------------------------------------------------
+
+async def _bot_me(chat_id: str) -> dict | None:
+    """Возвращает данные сессии для chat_id или None если не залогинен."""
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{API_BASE}/api/bot/me/{chat_id}")
+            if r.status_code == 200:
+                return r.json()
+            return None
+    except Exception:
+        return None
+
+
+async def _bot_login(username: str, password: str, chat_id: str) -> dict | None:
+    """Создаёт сессию. Возвращает данные или None при ошибке."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{API_BASE}/api/bot/login", json={
+                "username": username,
+                "password": password,
+                "telegram_chat_id": chat_id,
+            })
+            if r.status_code == 200:
+                return r.json()
+            return None
+    except Exception:
+        return None
+
+
+async def _bot_logout(chat_id: str) -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{API_BASE}/api/bot/logout", json={"telegram_chat_id": chat_id})
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _check_client_status(chat_id: str) -> str | None:
+    """Возвращает статус клиента: 'pending', 'approved', или None если не найден."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{API_BASE}/api/clients/by-telegram/{chat_id}")
             if r.status_code == 200:
-                data = r.json()
-                log.info("Пользователь уже зарегистрирован chat_id=%s", chat_id)
-                await update.message.reply_text(
-                    f"✅ Вы уже зарегистрированы!\n\n"
-                    f"ФИО: {data.get('full_name', '')}\n"
-                    f"Город: {data.get('city', '')}\n\n"
-                    f"Администратор может прикрепить вас к накладной для получения уведомлений.\n\n"
-                    f"Нажмите кнопку «{INTRANSIT_BTN}» под строкой ввода, чтобы увидеть свои заказы в дороге.",
-                    reply_markup=REPLY_KEYBOARD,
-                )
-                return ConversationHandler.END
-    except httpx.ConnectError as e:
-        log.warning("Backend недоступен при /start chat_id=%s: %s", chat_id, e)
-    except Exception as e:
-        log.exception("Ошибка при /start chat_id=%s: %s", chat_id, e)
+                return r.json().get("status", "approved")
+            return None
+    except Exception:
+        return None
 
+
+# ---------------------------------------------------------------------------
+# /start — Registration flow (для новых клиентов)
+# ---------------------------------------------------------------------------
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    log.info("/start chat_id=%s", chat_id)
+
+    # Уже есть активная сессия — пользователь залогинен
+    session = await _bot_me(chat_id)
+    if session:
+        await update.message.reply_text(
+            f"✅ Вы вошли как <b>{session['username']}</b>.\n\n"
+            f"Нажмите «{INTRANSIT_BTN}» чтобы посмотреть ваши заказы.\n"
+            f"Для выхода — /logout",
+            parse_mode="HTML",
+            reply_markup=REPLY_KEYBOARD,
+        )
+        return ConversationHandler.END
+
+    # Проверяем статус клиента по telegram_chat_id
+    client_status = await _check_client_status(chat_id)
+    if client_status == "pending":
+        await update.message.reply_text(
+            "⏳ <b>Ваша заявка на регистрацию уже отправлена!</b>\n\n"
+            "Ожидайте — администратор рассмотрит её и пришлёт данные для входа.",
+            parse_mode="HTML",
+        )
+        return ConversationHandler.END
+    elif client_status == "approved":
+        await update.message.reply_text(
+            "ℹ️ Вы зарегистрированы, но сессия не найдена.\n"
+            "Для входа используйте /login",
+        )
+        return ConversationHandler.END
+
+    # Новый пользователь — начинаем регистрацию
     await update.message.reply_text(
-        "👋 Добро пожаловать!\n\n"
+        "👋 <b>Добро пожаловать!</b>\n\n"
         "Для регистрации введите ваши данные.\n"
-        "Сначала напишите ваши ФИО (Фамилия Имя Отчество):"
+        "Сначала напишите ваше <b>ФИО</b> (Фамилия Имя Отчество):",
+        parse_mode="HTML",
     )
     return REG_NAME
 
 
 async def reg_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = (update.message.text or "").strip()
-    if not name:
-        await update.message.reply_text("Пожалуйста, введите ФИО.")
+    if not name or len(name) < 2:
+        await update.message.reply_text("Пожалуйста, введите корректное ФИО (минимум 2 символа).")
         return REG_NAME
-    context.user_data["reg_full_name"] = name
-    await update.message.reply_text("Теперь введите ваш город:")
+    context.user_data["reg_name"] = name
+    await update.message.reply_text(
+        f"Отлично, <b>{name}</b>!\n\nТеперь напишите ваш <b>город</b>:",
+        parse_mode="HTML",
+    )
     return REG_CITY
 
 
 async def reg_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = (update.message.text or "").strip()
-    if not city:
-        await update.message.reply_text("Пожалуйста, введите город.")
+    if not city or len(city) < 2:
+        await update.message.reply_text("Пожалуйста, введите корректное название города.")
         return REG_CITY
-    context.user_data["reg_city"] = city
-    full_name = context.user_data.get("reg_full_name", "")
+
+    name = context.user_data.get("reg_name", "")
     chat_id = str(update.effective_chat.id)
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{API_BASE}/api/clients/register",
-                json={
-                    "full_name": full_name,
-                    "city": city,
-                    "telegram_chat_id": chat_id,
-                },
-            )
-            r.raise_for_status()
-            data = r.json()
-        log.info("Регистрация успешна chat_id=%s client_id=%s", chat_id, data.get("id"))
-        await update.message.reply_text(
-            f"✅ Регистрация завершена!\n\n"
-            f"Ваш ID: <code>{data['id']}</code>\n"
-            f"ФИО: {full_name}\n"
-            f"Город: {city}\n\n"
-            f"Теперь администратор может прикрепить вас к накладной, "
-            f"и вы будете получать уведомления об отправке и прибытии. "
-            f"Кнопка «{INTRANSIT_BTN}» покажет ваши заказы в дороге.",
-            parse_mode="HTML",
-            reply_markup=REPLY_KEYBOARD,
-        )
-    except httpx.ConnectError as e:
-        log.warning("Backend недоступен при регистрации chat_id=%s: %s", chat_id, e)
-        await update.message.reply_text(
-            "Ошибка: не удалось подключиться к серверу.\n\n"
-            "Запустите backend из корня проекта:\n"
-            "cd \"ИБРА ПРОЕКТ\"\n"
-            "python -m uvicorn backend.main:app --host 0.0.0.0 --port 8800\n\n"
-            "Или дважды кликните run_backend.bat"
-        )
-    except Exception as e:
-        log.exception("Ошибка регистрации chat_id=%s: %s", chat_id, e)
-        await update.message.reply_text(f"Ошибка регистрации: {e}")
     context.user_data.clear()
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.post(f"{API_BASE}/api/clients/register", json={
+                "full_name": name,
+                "city": city,
+                "telegram_chat_id": chat_id,
+            })
+
+        if r.status_code in (200, 201):
+            data = r.json()
+            if data.get("status") == "approved":
+                # Повторная регистрация уже одобренного — значит есть аккаунт
+                await update.message.reply_text(
+                    "ℹ️ Вы уже зарегистрированы.\nДля входа используйте /login",
+                )
+            else:
+                await update.message.reply_text(
+                    "✅ <b>Заявка отправлена!</b>\n\n"
+                    "Администратор рассмотрит вашу заявку и создаст аккаунт.\n"
+                    "Как только вас одобрят — вы получите данные для входа прямо здесь.",
+                    parse_mode="HTML",
+                )
+            log.info("Клиент зарегистрирован как pending: chat_id=%s name=%s city=%s", chat_id, name, city)
+        else:
+            await update.message.reply_text("Произошла ошибка при отправке заявки. Попробуйте позже.")
+            log.warning("Ошибка регистрации клиента chat_id=%s: status=%s body=%s", chat_id, r.status_code, r.text)
+
+    except httpx.ConnectError:
+        await update.message.reply_text("Ошибка: сервер недоступен. Попробуйте позже.")
+    except Exception as e:
+        log.exception("Ошибка при регистрации клиента chat_id=%s: %s", chat_id, e)
+        await update.message.reply_text(f"Ошибка: {e}")
+
     return ConversationHandler.END
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("Регистрация отменена.")
+    await update.message.reply_text("Отменено.")
     return ConversationHandler.END
 
 
-async def fallback_intransit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_intransit(update, context)
+# ---------------------------------------------------------------------------
+# /login — Вход по логину/паролю (для администраторов и существующих клиентов)
+# ---------------------------------------------------------------------------
+
+async def cmd_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    session = await _bot_me(chat_id)
+    if session:
+        await update.message.reply_text(
+            f"✅ Вы уже вошли как <b>{session['username']}</b>.\n"
+            f"Для выхода — /logout",
+            parse_mode="HTML",
+            reply_markup=REPLY_KEYBOARD,
+        )
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "Введите ваш <b>логин</b>:\n"
+        "(логин и пароль выдаёт администратор)",
+        parse_mode="HTML",
+    )
+    return LOGIN_USERNAME
+
+
+async def login_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = (update.message.text or "").strip()
+    if not username:
+        await update.message.reply_text("Пожалуйста, введите логин.")
+        return LOGIN_USERNAME
+    context.user_data["login_username"] = username
+    await update.message.reply_text("Введите <b>пароль</b>:", parse_mode="HTML")
+    return LOGIN_PASSWORD
+
+
+async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    password = (update.message.text or "").strip()
+    if not password:
+        await update.message.reply_text("Пожалуйста, введите пароль.")
+        return LOGIN_PASSWORD
+
+    chat_id = str(update.effective_chat.id)
+    username = context.user_data.get("login_username", "")
+    context.user_data.clear()
+
+    try:
+        session = await _bot_login(username, password, chat_id)
+        if session:
+            log.info("Bot login success chat_id=%s username=%s", chat_id, username)
+            await update.message.reply_text(
+                f"✅ Вы вошли как <b>{session['username']}</b>.\n\n"
+                f"Нажмите кнопку «{INTRANSIT_BTN}» чтобы увидеть ваши заказы.\n"
+                f"Для выхода — /logout",
+                parse_mode="HTML",
+                reply_markup=REPLY_KEYBOARD,
+            )
+        else:
+            log.warning("Bot login failed chat_id=%s username=%s", chat_id, username)
+            await update.message.reply_text(
+                "❌ Неверный логин или пароль.\n\n"
+                "Попробуйте снова — отправьте /login\n"
+                "Или обратитесь к администратору.",
+            )
+    except httpx.ConnectError:
+        await update.message.reply_text("Ошибка: backend не запущен. Попробуйте позже.")
+    except Exception as e:
+        log.exception("Ошибка при входе chat_id=%s: %s", chat_id, e)
+        await update.message.reply_text(f"Ошибка: {e}")
+
     return ConversationHandler.END
 
 
-async def fallback_arriving_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_arriving_week(update, context)
-    return ConversationHandler.END
+# ---------------------------------------------------------------------------
+# /logout
+# ---------------------------------------------------------------------------
 
+async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = str(update.effective_chat.id)
+    ok = await _bot_logout(chat_id)
+    if ok:
+        await update.message.reply_text("👋 Вы вышли из аккаунта.\n\nДля входа отправьте /login")
+    else:
+        await update.message.reply_text("Вы не были авторизованы.")
+    log.info("Bot logout chat_id=%s", chat_id)
+
+
+# ---------------------------------------------------------------------------
+# Общие helpers
+# ---------------------------------------------------------------------------
 
 async def fetch_shipments(status=None, sort="dispatch_date", order="desc"):
     params = {"sort": sort, "order": order}
@@ -189,7 +344,6 @@ def format_shipment(s: dict) -> str:
 
 
 def format_shipment_short(s: dict, index: int) -> str:
-    """Одна строка для списка: название, трекинг, дата, вид, вес, сумма, статус."""
     st = s.get("shipping_type", "")
     title = (s.get("title") or "Без названия")[:40]
     tracking = s.get("tracking") or "—"
@@ -197,25 +351,33 @@ def format_shipment_short(s: dict, index: int) -> str:
     kind = SHIPPING_LABELS.get(st, st)
     weight = s.get("weight", 0)
     amount = s.get("amount_to_pay", 0)
-    status = "в дороге"
-    return f"{index}) {title}, {tracking}, {date}, {kind}, {weight} кг, {amount}, {status}"
+    return f"{index}) {title}, {tracking}, {date}, {kind}, {weight} кг, {amount}, в дороге"
 
 
 def format_shipment_detail(s: dict) -> str:
-    """Подробная карточка заказа."""
-    base = format_shipment(s)
+    status = s.get("status", "in_transit")
+    status_label = "в дороге" if status == "in_transit" else "доставлено" if status == "delivered" else status
+    base = (
+        f"📦 <b>{s.get('title') or 'Без заголовка'}</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🔢 Трекинг: <code>{s.get('tracking') or '—'}</code>\n"
+        f"📅 Дата отправки: {s.get('dispatch_date') or '—'}\n"
+        f"📋 Вид доставки: {SHIPPING_LABELS.get(s.get('shipping_type', ''), s.get('shipping_type', '—'))}\n"
+        f"⚖️ Вес: {s.get('weight')} кг\n"
+        f"💰 Сумма к оплате: {s.get('amount_to_pay')}\n"
+        f"📌 Статус: {status_label}\n"
+    )
     extra = []
     if s.get("product_list"):
-        extra.append(f"Состав: {s['product_list']}")
+        extra.append(f"📝 Состав: {s['product_list']}")
     if s.get("notes"):
-        extra.append(f"Примечание: {s['notes']}")
+        extra.append(f"💬 Примечание: {s['notes']}")
     if extra:
-        base += "\n\n" + "\n".join(extra)
+        base += "━━━━━━━━━━━━━━━━\n" + "\n".join(extra)
     return base
 
 
 async def fetch_in_transit_by_telegram(chat_id: str):
-    """Накладные «в дороге», закреплённые за клиентом по telegram_chat_id."""
     async with httpx.AsyncClient() as client:
         r = await client.get(f"{API_BASE}/api/shipments/in-transit-by-telegram/{chat_id}")
         if r.status_code == 404:
@@ -225,7 +387,6 @@ async def fetch_in_transit_by_telegram(chat_id: str):
 
 
 async def fetch_shipment_by_tracking(chat_id: str, tracking: str):
-    """Один заказ по трекингу только если он привязан к этому telegram."""
     async with httpx.AsyncClient() as client:
         r = await client.get(
             f"{API_BASE}/api/shipments/by-tracking",
@@ -237,7 +398,11 @@ async def fetch_shipment_by_tracking(chat_id: str, tracking: str):
         return r.json()
 
 
-def _build_intransit_text(shipments_slice: list, total_count: int, total_sum: float, page: int, total_pages: int) -> str:
+# ---------------------------------------------------------------------------
+# «Товар в дороге» + пагинация
+# ---------------------------------------------------------------------------
+
+def _build_intransit_text(shipments_slice, total_count, total_sum, page, total_pages):
     lines = [
         f"Всего доставок: {total_count}",
         f"Сумма к оплате: {total_sum}",
@@ -250,8 +415,7 @@ def _build_intransit_text(shipments_slice: list, total_count: int, total_sum: fl
     return "\n".join(lines)
 
 
-def _build_intransit_keyboard(shipments_slice: list, page: int, total_pages: int):
-    """До 8 кнопок: 1–6 (по 2 в ряду), затем Вперёд/Назад при необходимости."""
+def _build_intransit_keyboard(shipments_slice, page, total_pages):
     buttons = []
     row = []
     for i, s in enumerate(shipments_slice):
@@ -273,16 +437,20 @@ def _build_intransit_keyboard(shipments_slice: list, page: int, total_pages: int
 
 
 async def handle_intransit_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопки «Товар в дороге» под строкой ввода: список заказов клиента с пагинацией."""
     chat_id = str(update.effective_chat.id)
+
+    session = await _bot_me(chat_id)
+    if not session:
+        await update.message.reply_text(
+            "Для просмотра заказов необходимо войти.\n"
+            "Если вы уже зарегистрированы — отправьте /login\n"
+            "Если нет — отправьте /start"
+        )
+        return
+
     try:
         shipments = await fetch_in_transit_by_telegram(chat_id)
-        if shipments is None:
-            await update.message.reply_text(
-                "Сначала зарегистрируйтесь: отправьте /start и введите ФИО и город.",
-            )
-            return
-        if not shipments:
+        if shipments is None or not shipments:
             await update.message.reply_text("Нет заказов в дороге.")
             return
         total_sum = sum(float(s.get("amount_to_pay") or 0) for s in shipments)
@@ -305,20 +473,24 @@ async def handle_intransit_button(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def handle_intransit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback: it_page_N — перелистовать; it_detail_<id> — показать заказ подробно."""
     query = update.callback_query
     data = (query.data or "").strip()
     if not data.startswith("it_"):
         return
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception as e:
+        log.warning("query.answer() в intransit_callback: %s", e)
     chat_id = str(update.effective_chat.id)
     if data.startswith("it_detail_"):
-        shipment_id = data.replace("it_detail_", "", 1)
+        shipment_id = data.replace("it_detail_", "", 1).strip()
         shipments = context.user_data.get("intransit_list") or []
-        shipment = next((s for s in shipments if s.get("id") == shipment_id), None)
+        shipment = next((s for s in shipments if str(s.get("id") or "") == shipment_id), None)
         if shipment:
             text = format_shipment_detail(shipment)
             await query.message.reply_text(text, parse_mode="HTML")
+        else:
+            await query.message.reply_text("Заказ не найден. Нажмите «Товар в дороге» и выберите пункт снова.")
         return
     if data.startswith("it_page_"):
         try:
@@ -330,7 +502,7 @@ async def handle_intransit_callback(update: Update, context: ContextTypes.DEFAUL
         if not shipments or page < 1 or page > total_pages:
             return
         start = (page - 1) * 6
-        slice_ = shipments[start : start + 6]
+        slice_ = shipments[start: start + 6]
         total_count = len(shipments)
         total_sum = sum(float(s.get("amount_to_pay") or 0) for s in shipments)
         text = _build_intransit_text(slice_, total_count, total_sum, page, total_pages)
@@ -339,17 +511,17 @@ async def handle_intransit_callback(update: Update, context: ContextTypes.DEFAUL
             await query.edit_message_text(text=text, reply_markup=keyboard)
         except Exception:
             pass
-        return
 
+
+# ---------------------------------------------------------------------------
+# Поиск по трекингу
+# ---------------------------------------------------------------------------
 
 def _looks_like_tracking(text: str) -> bool:
-    """Текст похож на трекинг: не команда, без пробелов или одна строка, длина от 4."""
     if not text or len(text) > 80:
         return False
     stripped = text.strip()
-    if not stripped:
-        return False
-    if stripped.startswith("/"):
+    if not stripped or stripped.startswith("/"):
         return False
     if re.search(r"[\s\n]", stripped):
         return False
@@ -357,24 +529,26 @@ def _looks_like_tracking(text: str) -> bool:
 
 
 async def handle_tracking_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Пользователь ввёл в чат трекинг — ищем заказ по трекингу + telegram (только свои)."""
     text = (update.message.text or "").strip()
     if not _looks_like_tracking(text):
         return
     chat_id = str(update.effective_chat.id)
+
+    session = await _bot_me(chat_id)
+    if not session:
+        await update.message.reply_text("Для поиска заказов необходимо войти. Отправьте /login")
+        return
+
     try:
         shipment = await fetch_shipment_by_tracking(chat_id, text)
         if shipment is None:
-            await update.message.reply_text("Заказ не найден или не привязан к вашему аккаунту.")
+            await update.message.reply_text(
+                "По этому трек-номеру заказ не найден среди ваших доставок. "
+                "Проверьте номер или нажмите «Товар в дороге»."
+            )
             return
-        total_sum = float(shipment.get("amount_to_pay") or 0)
-        total_count = 1
-        context.user_data["intransit_list"] = [shipment]
-        context.user_data["intransit_total_pages"] = 1
-        slice_ = [shipment]
-        msg_text = _build_intransit_text(slice_, total_count, total_sum, 1, 1)
-        keyboard = _build_intransit_keyboard(slice_, 1, 1)
-        await update.message.reply_text(msg_text, reply_markup=keyboard)
+        msg_text = format_shipment_detail(shipment)
+        await update.message.reply_text(msg_text, parse_mode="HTML")
         log.debug("Поиск по трекингу chat_id=%s tracking=%s", chat_id, text)
     except httpx.ConnectError as e:
         log.warning("Backend недоступен (трекинг) chat_id=%s: %s", chat_id, e)
@@ -384,13 +558,15 @@ async def handle_tracking_search(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(f"Ошибка: {e}")
 
 
+# ---------------------------------------------------------------------------
+# /intransit
+# ---------------------------------------------------------------------------
+
 async def cmd_intransit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /intransit: для обратной совместимости — показывает заказы в дороге (по telegram)."""
     await handle_intransit_button(update, context)
 
 
 async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Текст от пользователя: кнопка «Товар в дороге» или поиск по трекингу."""
     text = (update.message.text or "").strip()
     if text == INTRANSIT_BTN:
         await handle_intransit_button(update, context)
@@ -398,6 +574,10 @@ async def on_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if _looks_like_tracking(text):
         await handle_tracking_search(update, context)
 
+
+# ---------------------------------------------------------------------------
+# /arriving_week
+# ---------------------------------------------------------------------------
 
 def _arriving_in_week(shipment, today):
     from datetime import timedelta
@@ -425,9 +605,20 @@ def _arriving_in_week(shipment, today):
 
 async def cmd_arriving_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from datetime import date
+    chat_id = str(update.effective_chat.id)
+
+    session = await _bot_me(chat_id)
+    if not session:
+        await update.message.reply_text("Для использования команды необходимо войти. Отправьте /login")
+        return
+
     try:
-        shipments = await fetch_shipments(status="in_transit", order="desc")
         today = date.today()
+        if session.get("role") == "admin":
+            shipments = await fetch_shipments(status="in_transit", order="desc")
+        else:
+            shipments = await fetch_in_transit_by_telegram(chat_id) or []
+
         arriving = [s for s in shipments if _arriving_in_week(s, today)]
         if not arriving:
             await update.message.reply_text("Нет накладных, которые приедут в течение 7 дней.")
@@ -441,8 +632,111 @@ async def cmd_arriving_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Отслеживание групп (бот добавлен / удалён / переименован)
+# ---------------------------------------------------------------------------
+
+async def _sync_group_to_backend(chat_id: str, title: str, member_count: int = 0):
+    """Отправляет данные группы на бэкенд."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(f"{API_BASE}/api/groups/sync", json={
+                "chat_id": chat_id,
+                "title": title,
+                "member_count": member_count,
+            })
+    except Exception as e:
+        log.warning("Не удалось синхронизировать группу chat_id=%s: %s", chat_id, e)
+
+
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Срабатывает когда статус бота в чате меняется (добавили/удалили/сделали админом)."""
+    result = update.my_chat_member
+    if not result:
+        return
+
+    chat = result.chat
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    new_status = result.new_chat_member.status if result.new_chat_member else None
+    chat_id = str(chat.id)
+    title = chat.title or f"Группа {chat_id}"
+
+    if new_status in ("member", "administrator"):
+        try:
+            count = await context.bot.get_chat_member_count(chat.id)
+        except Exception:
+            count = 0
+        await _sync_group_to_backend(chat_id, title, count)
+        log.info("Бот добавлен в группу chat_id=%s title=%s members=%d", chat_id, title, count)
+
+    elif new_status in ("left", "kicked", "banned"):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.delete(f"{API_BASE}/api/groups/{chat_id}")
+        except Exception as e:
+            log.warning("Не удалось удалить группу chat_id=%s: %s", chat_id, e)
+        log.info("Бот удалён из группы chat_id=%s title=%s", chat_id, title)
+
+
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """При любом сообщении в группе обновляем название и кол-во участников."""
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return
+    cache_key = f"group_synced_{chat.id}"
+    if context.bot_data.get(cache_key):
+        return
+    context.bot_data[cache_key] = True
+    try:
+        count = await context.bot.get_chat_member_count(chat.id)
+    except Exception:
+        count = 0
+    await _sync_group_to_backend(str(chat.id), chat.title or str(chat.id), count)
+
+
+async def cmd_syncgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Принудительная синхронизация текущей группы с бэкендом."""
+    chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        await update.message.reply_text("Эту команду нужно запускать в группе, а не в личных сообщениях.")
+        return
+    try:
+        count = await context.bot.get_chat_member_count(chat.id)
+    except Exception:
+        count = 0
+    await _sync_group_to_backend(str(chat.id), chat.title or str(chat.id), count)
+    context.bot_data.pop(f"group_synced_{chat.id}", None)
+    await update.message.reply_text(f"✅ Группа «{chat.title}» зарегистрирована на сайте.")
+    log.info("Ручная синхронизация группы chat_id=%s title=%s", chat.id, chat.title)
+
+
+# ---------------------------------------------------------------------------
+# Fallbacks для ConversationHandler
+# ---------------------------------------------------------------------------
+
+async def fallback_intransit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_intransit(update, context)
+    return ConversationHandler.END
+
+
+async def fallback_arriving_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_arriving_week(update, context)
+    return ConversationHandler.END
+
+
+async def fallback_login(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await cmd_login(update, context)
+    return ConversationHandler.END
+
+
+# ---------------------------------------------------------------------------
+# Админ-команды (/logs, /delete_all_project)
+# ---------------------------------------------------------------------------
+
 async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /logs — только для user 1338143348. Отправляет два файла: логи бота и логи сайта."""
     user_id = update.effective_user.id if update.effective_user else None
     if user_id != ALLOWED_DELETE_USER_ID:
         log.warning("/logs вызван пользователем без доступа user_id=%s", user_id)
@@ -450,7 +744,6 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     log.info("/logs запрошены user_id=%s", user_id)
     try:
-        # 1) Файл логов бота
         if BOT_LOG_FILE.exists():
             bot_content = BOT_LOG_FILE.read_text(encoding="utf-8")
             await update.message.reply_document(
@@ -459,8 +752,7 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption="📋 Логи бота",
             )
         else:
-            await update.message.reply_text("Файл логов бота ещё не создан (bot_logs.txt).")
-        # 2) Логи сайта с API
+            await update.message.reply_text("Файл логов бота ещё не создан.")
         secret = (os.getenv("DELETE_ALL_SECRET") or "").strip()
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.get(
@@ -475,18 +767,16 @@ async def cmd_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption="📋 Логи сайта (backend)",
             )
         else:
-            await update.message.reply_text(f"Не удалось получить логи сайта: {r.status_code}. Проверьте backend и DELETE_ALL_SECRET.")
-            log.warning("GET /api/admin/logs вернул %s", r.status_code)
+            await update.message.reply_text(f"Не удалось получить логи сайта: {r.status_code}.")
     except httpx.ConnectError as e:
         log.warning("Backend недоступен при /logs: %s", e)
-        await update.message.reply_text("Ошибка: backend не запущен. Логи сайта недоступны.")
+        await update.message.reply_text("Ошибка: backend не запущен.")
     except Exception as e:
         log.exception("Ошибка при отправке логов: %s", e)
         await update.message.reply_text(f"Ошибка: {e}")
 
 
 async def cmd_delete_all_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /delete_all_project — только для пользователя с id 1338143348."""
     user_id = update.effective_user.id if update.effective_user else None
     if user_id != ALLOWED_DELETE_USER_ID:
         await update.message.reply_text("У вас нет доступа к этой команде.")
@@ -497,14 +787,10 @@ async def cmd_delete_all_project(update: Update, context: ContextTypes.DEFAULT_T
             InlineKeyboardButton("Отмена", callback_data="da_cancel"),
         ]
     ])
-    await update.message.reply_text(
-        "Вы уверены, что хотите всё удалить?",
-        reply_markup=keyboard,
-    )
+    await update.message.reply_text("Вы уверены, что хотите всё удалить?", reply_markup=keyboard)
 
 
 async def handle_delete_all_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопок подтверждения удаления всего проекта."""
     query = update.callback_query
     data = (query.data or "").strip()
     if not data.startswith("da_"):
@@ -529,21 +815,26 @@ async def handle_delete_all_callback(update: Update, context: ContextTypes.DEFAU
                     headers={"X-Admin-Secret": secret} if secret else {},
                 )
             if r.status_code == 200:
-                await query.edit_message_text(text="Запрос на удаление отправлен. Сервер выполняет очистку.")
+                await query.edit_message_text(text="Запрос на удаление отправлен.")
             else:
-                await query.edit_message_text(text=f"Ошибка: {r.status_code}. Проверьте DELETE_ALL_SECRET в .env на сервере.")
+                await query.edit_message_text(text=f"Ошибка: {r.status_code}.")
         except httpx.ConnectError:
             await query.edit_message_text(text="Ошибка: не удалось подключиться к серверу.")
         except Exception as e:
             await query.edit_message_text(text=f"Ошибка: {e}")
 
 
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
 def main():
     log.info("Запуск бота API=%s", API_BASE)
     print("Запуск бота...")
     print(f"API: {API_BASE}")
 
-    conv_handler = ConversationHandler(
+    # ConversationHandler для регистрации (/start)
+    register_conv = ConversationHandler(
         entry_points=[CommandHandler("start", cmd_start)],
         states={
             REG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_name)],
@@ -551,8 +842,22 @@ def main():
         },
         fallbacks=[
             CommandHandler("cancel", cmd_cancel),
+            CommandHandler("login", fallback_login),
+        ],
+    )
+
+    # ConversationHandler для входа (/login)
+    login_conv = ConversationHandler(
+        entry_points=[CommandHandler("login", cmd_login)],
+        states={
+            LOGIN_USERNAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_username)],
+            LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
             CommandHandler("intransit", fallback_intransit),
             CommandHandler("arriving_week", fallback_arriving_week),
+            CommandHandler("logout", cmd_logout),
         ],
     )
 
@@ -562,18 +867,30 @@ def main():
         .concurrent_updates(False)
         .build()
     )
-    app.add_handler(conv_handler)
+    app.add_handler(register_conv)
+    app.add_handler(login_conv)
+    app.add_handler(CommandHandler("logout", cmd_logout))
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("delete_all_project", cmd_delete_all_project))
     app.add_handler(CommandHandler("intransit", cmd_intransit))
     app.add_handler(CommandHandler("arriving_week", cmd_arriving_week))
-    app.add_handler(CallbackQueryHandler(handle_delete_all_callback))
+    app.add_handler(CallbackQueryHandler(handle_intransit_callback, pattern=r"^it_"))
+    app.add_handler(CallbackQueryHandler(handle_delete_all_callback, pattern=r"^da_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text_message))
-    app.add_handler(CallbackQueryHandler(handle_intransit_callback))
+    # Отслеживание групп (group=1 — запускается параллельно с основными хэндлерами)
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(
+        MessageHandler(filters.ChatType.GROUPS & filters.TEXT, handle_group_message),
+        group=1,
+    )
+    app.add_handler(CommandHandler("syncgroups", cmd_syncgroups))
 
     log.info("Бот запущен")
     print("Бот запущен. Отправьте /start в Telegram.")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(
+        drop_pending_updates=False,
+        allowed_updates=["message", "callback_query", "my_chat_member"],
+    )
 
 
 if __name__ == "__main__":

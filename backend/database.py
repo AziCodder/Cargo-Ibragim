@@ -1,4 +1,7 @@
+import os
 import sqlite3
+import uuid
+from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -45,6 +48,81 @@ def _migrate_clients(conn):
     if "delivery_notified" not in cols:
         conn.execute("ALTER TABLE shipments ADD COLUMN delivery_notified INTEGER NOT NULL DEFAULT 0")
 
+    # Миграция: group_chat_id для клиентов
+    client_cols = [r[1] for r in conn.execute("PRAGMA table_info(clients)").fetchall()]
+    if "group_chat_id" not in client_cols:
+        conn.execute("ALTER TABLE clients ADD COLUMN group_chat_id TEXT")
+    # Миграция: status для клиентов (pending / approved)
+    if "status" not in client_cols:
+        conn.execute("ALTER TABLE clients ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
+
+
+def _migrate_auth(conn):
+    """Создаёт таблицы users и bot_sessions если их нет."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'client',
+            client_id TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bot_sessions (
+            telegram_chat_id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            client_id TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+
+def _ensure_admin(conn):
+    """Создаёт первого admin-пользователя, если таблица users пустая."""
+    from backend.auth import hash_password
+    from backend.logging_config import get_logger
+    log = get_logger()
+
+    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    if count == 0:
+        username = os.getenv("ADMIN_USERNAME", "admin")
+        password = os.getenv("ADMIN_PASSWORD", "admin")
+        if password == "admin":
+            log.warning(
+                "Создан admin-пользователь с паролем по умолчанию 'admin'. "
+                "Немедленно смените пароль через страницу Пользователи!"
+            )
+        user_id = str(uuid.uuid4())
+        created_at = datetime.utcnow().isoformat()
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, role, client_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, username, hash_password(password), "admin", None, created_at),
+        )
+        log.info("Создан первый admin-пользователь: username=%s", username)
+
+
+def _migrate_groups(conn):
+    """Создаёт таблицы telegram_groups и shipment_recipients если их нет."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS telegram_groups (
+            chat_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            member_count INTEGER NOT NULL DEFAULT 0,
+            added_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS shipment_recipients (
+            id TEXT PRIMARY KEY,
+            shipment_id TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            UNIQUE(shipment_id, chat_id)
+        )
+    """)
+
 
 def init_db():
     with get_db() as conn:
@@ -70,6 +148,9 @@ def init_db():
             )
         """)
         _migrate_clients(conn)
+        _migrate_auth(conn)
+        _migrate_groups(conn)
+        _ensure_admin(conn)
 
 
 def row_to_shipment(row) -> dict:
@@ -116,7 +197,7 @@ def row_to_shipment(row) -> dict:
 
 
 def row_to_client(row) -> dict:
-    return {
+    d = {
         "id": row["id"],
         "full_name": row["full_name"] or "",
         "city": row["city"] or "",
@@ -124,3 +205,12 @@ def row_to_client(row) -> dict:
         "phone": row["phone"],
         "created_at": row["created_at"],
     }
+    try:
+        d["group_chat_id"] = row["group_chat_id"]
+    except (KeyError, IndexError):
+        d["group_chat_id"] = None
+    try:
+        d["status"] = row["status"] or "approved"
+    except (KeyError, IndexError):
+        d["status"] = "approved"
+    return d

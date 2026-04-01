@@ -73,12 +73,14 @@ class ClientCreate(BaseModel):
     city: str = ""
     telegram_chat_id: Optional[str] = None
     phone: Optional[str] = None
+    group_chat_id: Optional[str] = None
 
 
 class ClientUpdate(BaseModel):
     full_name: Optional[str] = None
     city: Optional[str] = None
     phone: Optional[str] = None
+    group_chat_id: Optional[str] = None
 
 
 class ClientResponse(BaseModel):
@@ -87,7 +89,84 @@ class ClientResponse(BaseModel):
     city: str
     telegram_chat_id: Optional[str] = None
     phone: Optional[str] = None
+    group_chat_id: Optional[str] = None
+    status: str = "approved"
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class ApproveClientRequest(BaseModel):
+    username: str
+    password: str
+
+
+# --- Telegram Groups models ---
+
+class TelegramGroupResponse(BaseModel):
+    chat_id: str
+    title: str
+    member_count: int
+    added_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# --- Shipment Recipients models ---
+
+class RecipientAdd(BaseModel):
+    chat_id: str
+    label: str = ""
+
+
+class RecipientResponse(BaseModel):
+    id: str
+    shipment_id: str
+    chat_id: str
+    label: str
+
+    class Config:
+        from_attributes = True
+
+
+# --- Auth models ---
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = "client"
+    client_id: Optional[str] = None
+
+
+class UserUpdate(BaseModel):
+    password: Optional[str] = None
+    role: Optional[str] = None
+    client_id: Optional[str] = None
+
+
+class UserResponse(BaseModel):
+    id: str
+    username: str
+    role: str
+    client_id: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class BotLoginRequest(BaseModel):
+    username: str
+    password: str
+    telegram_chat_id: str
+
+
+class BotLogoutRequest(BaseModel):
+    telegram_chat_id: str

@@ -3,18 +3,19 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from fastapi.responses import RedirectResponse
 from typing import Optional, List
 from pydantic import BaseModel
 
+from backend.auth import get_current_user, require_admin
 from backend.database import get_db, row_to_shipment
 from backend.logging_config import get_logger
-from backend.models import ShipmentCreate, ShipmentUpdate, ShipmentResponse, Status
+from backend.models import ShipmentCreate, ShipmentUpdate, ShipmentResponse, Status, RecipientAdd, RecipientResponse
 from backend.services.telegram_service import (
     send_dispatch_notification,
     send_delivery_notification,
-    get_chat_id_for_shipment,
+    get_chat_ids_for_shipment,
 )
 
 router = APIRouter(prefix="/api/shipments", tags=["shipments"])
@@ -61,23 +62,43 @@ def _get_shipment_by_id(shipment_id: str) -> dict:
         return row_to_shipment(row)
 
 
+def _check_shipment_access(shipment: dict, current_user: dict):
+    """Проверяет доступ клиента к накладной. Admin — без ограничений."""
+    if current_user["role"] == "admin":
+        return
+    if shipment.get("client_id") != current_user.get("client_id"):
+        raise HTTPException(status_code=403, detail="Доступ запрещён")
+
+
 @router.get("", response_model=List[ShipmentResponse])
 def list_shipments(
     status: Optional[str] = None,
     sort: str = "dispatch_date",
     order: str = "desc",
+    current_user: dict = Depends(get_current_user),
 ):
     with get_db() as conn:
         query = """SELECT s.*, c.full_name as client_name
                    FROM shipments s
                    LEFT JOIN clients c ON s.client_id = c.id"""
         params = []
+
+        conditions = []
         if status == "closed":
-            query += " WHERE s.status IN (?, ?)"
+            conditions.append("s.status IN (?, ?)")
             params.extend([Status.DELIVERED.value, Status.CANCELLED.value])
         elif status:
-            query += " WHERE s.status = ?"
+            conditions.append("s.status = ?")
             params.append(status)
+
+        # Клиент видит только свои накладные
+        if current_user["role"] == "client":
+            conditions.append("s.client_id = ?")
+            params.append(current_user.get("client_id"))
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
         order_col = "s.dispatch_date" if sort == "dispatch_date" else "s.created_at"
         direction = "DESC" if order.lower() == "desc" else "ASC"
         query += f" ORDER BY {order_col} {direction}"
@@ -87,15 +108,19 @@ def list_shipments(
 
 @router.get("/in-transit-by-telegram/{telegram_chat_id}", response_model=List[ShipmentResponse])
 def list_in_transit_by_telegram(telegram_chat_id: str):
-    """Накладные «в дороге» для клиента по его telegram_chat_id (только закреплённые за ним)."""
+    """Накладные «в дороге» для клиента по его telegram_chat_id или bot_session."""
     with get_db() as conn:
         rows = conn.execute(
             """SELECT s.*, c.full_name as client_name
                FROM shipments s
                INNER JOIN clients c ON s.client_id = c.id
-               WHERE c.telegram_chat_id = ? AND s.status = ?
+               WHERE (
+                   c.telegram_chat_id = ?
+                   OR c.id IN (SELECT client_id FROM bot_sessions WHERE telegram_chat_id = ?)
+               )
+               AND s.status = ?
                ORDER BY s.dispatch_date DESC""",
-            (telegram_chat_id, Status.IN_TRANSIT.value),
+            (telegram_chat_id, telegram_chat_id, Status.IN_TRANSIT.value),
         ).fetchall()
     return [row_to_shipment(r) for r in rows]
 
@@ -111,8 +136,12 @@ def get_shipment_by_tracking(tracking: str, telegram_chat_id: str):
             """SELECT s.*, c.full_name as client_name
                FROM shipments s
                INNER JOIN clients c ON s.client_id = c.id
-               WHERE c.telegram_chat_id = ? AND LOWER(TRIM(s.tracking)) = LOWER(?)""",
-            (telegram_chat_id, tracking),
+               WHERE (
+                   c.telegram_chat_id = ?
+                   OR c.id IN (SELECT client_id FROM bot_sessions WHERE telegram_chat_id = ?)
+               )
+               AND LOWER(TRIM(s.tracking)) = LOWER(?)""",
+            (telegram_chat_id, telegram_chat_id, tracking),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Заказ не найден или не привязан к вашему аккаунту")
@@ -120,25 +149,28 @@ def get_shipment_by_tracking(tracking: str, telegram_chat_id: str):
 
 
 @router.get("/cashback", response_model=List[ShipmentResponse])
-def list_cashback_shipments():
-    """Накладные «в дороге» и «доставлено» для расчёта по кэшбеку: сначала не рассчитанные, затем рассчитанные."""
+def list_cashback_shipments(_admin=Depends(require_admin)):
+    """Только для admin: накладные «в дороге» и «доставлено» для расчёта по кэшбеку."""
     with get_db() as conn:
         rows = conn.execute(
-            """SELECT * FROM shipments 
-               WHERE status IN (?, ?) 
-               ORDER BY calculated ASC, delivery_date ASC, created_at ASC""",
+            """SELECT s.*, c.full_name as client_name
+               FROM shipments s
+               LEFT JOIN clients c ON s.client_id = c.id
+               WHERE s.status IN (?, ?)
+               ORDER BY s.calculated ASC, s.delivery_date ASC, s.created_at ASC""",
             (Status.IN_TRANSIT.value, Status.DELIVERED.value),
         ).fetchall()
     return [row_to_shipment(r) for r in rows]
 
 
 @router.get("/{shipment_id}", response_model=ShipmentResponse)
-def get_shipment(shipment_id: str):
-    return _get_shipment_by_id(shipment_id)
+def get_shipment(shipment_id: str, current_user: dict = Depends(get_current_user)):
+    s = _get_shipment_by_id(shipment_id)
+    _check_shipment_access(s, current_user)
+    return s
 
 
 def _tracking_taken(conn, tracking: str, exclude_shipment_id: Optional[str] = None) -> bool:
-    """Проверка: занят ли трекинг (без учёта регистра и пробелов). exclude_shipment_id — при редактировании своей накладной."""
     if not (tracking or "").strip():
         return False
     t = (tracking or "").strip()
@@ -156,7 +188,7 @@ def _tracking_taken(conn, tracking: str, exclude_shipment_id: Optional[str] = No
 
 
 @router.post("", response_model=ShipmentResponse, status_code=201)
-async def create_shipment(data: ShipmentCreate):
+async def create_shipment(data: ShipmentCreate, _admin=Depends(require_admin)):
     shipment_id = str(uuid.uuid4())
     created_at = datetime.utcnow().isoformat()
     delivery = data.delivery_date.isoformat() if data.delivery_date else None
@@ -193,6 +225,7 @@ async def upload_files(
     file1: Optional[UploadFile] = File(None),
     file2: Optional[UploadFile] = File(None),
     file3: Optional[UploadFile] = File(None),
+    _admin=Depends(require_admin),
 ):
     _get_shipment_by_id(shipment_id)
     file_paths = _save_files(shipment_id, [file1, file2, file3])
@@ -206,9 +239,21 @@ async def upload_files(
 
 
 @router.put("/{shipment_id}", response_model=ShipmentResponse)
-def update_shipment(shipment_id: str, data: ShipmentUpdate):
+def update_shipment(
+    shipment_id: str,
+    data: ShipmentUpdate,
+    current_user: dict = Depends(get_current_user),
+):
     existing = _get_shipment_by_id(shipment_id)
+    _check_shipment_access(existing, current_user)
+
     u = data.model_dump(exclude_unset=True)
+
+    # Клиент может менять только статус
+    if current_user["role"] == "client":
+        allowed = {"status"}
+        u = {k: v for k, v in u.items() if k in allowed}
+
     title = u.get("title", existing["title"])
     tracking = u.get("tracking", existing["tracking"])
     product_list = u.get("product_list", existing["product_list"])
@@ -237,15 +282,15 @@ def update_shipment(shipment_id: str, data: ShipmentUpdate):
             (title, tracking, product_list, notes, dispatch_date, delivery_date, status, shipping_type,
              weight, amount_to_pay, cashback, calculated, client_id, client_phone, shipment_id),
         )
-    log.info("Обновлена накладная id=%s", shipment_id)
+    log.info("Обновлена накладная id=%s by=%s", shipment_id, current_user["username"])
     return _get_shipment_by_id(shipment_id)
 
 
 @router.post("/{shipment_id}/notify-dispatch")
-def notify_dispatch(shipment_id: str):
+def notify_dispatch(shipment_id: str, _admin=Depends(require_admin)):
     s = _get_shipment_by_id(shipment_id)
-    chat_id = get_chat_id_for_shipment(s)
-    if not chat_id:
+    chat_ids = get_chat_ids_for_shipment(s)
+    if not chat_ids:
         raise HTTPException(
             status_code=400,
             detail="У накладной нет клиента с Telegram. Прикрепите клиента, зарегистрированного в боте, или укажите TELEGRAM_CHAT_ID в .env.",
@@ -256,19 +301,18 @@ def notify_dispatch(shipment_id: str):
         raise HTTPException(status_code=500, detail="Не удалось отправить уведомление")
     with get_db() as conn:
         conn.execute("UPDATE shipments SET dispatch_notified = 1 WHERE id = ?", (shipment_id,))
-    log.info("Уведомление об отправке отправлено shipment_id=%s chat_id=%s", shipment_id, chat_id)
+    log.info("Уведомление об отправке отправлено shipment_id=%s", shipment_id)
     return {"ok": True}
 
 
 @router.post("/{shipment_id}/notify-delivery")
-def notify_delivery(shipment_id: str):
+def notify_delivery(shipment_id: str, _admin=Depends(require_admin)):
     s = _get_shipment_by_id(shipment_id)
-    if s["status"] != Status.DELIVERED.value:
-        raise HTTPException(status_code=400, detail="Пожалуйста, исправьте накладную: статус должен быть «доставлено»")
+    # Ограничение по статусу убрано — уведомление можно отправить в любой момент
     if not s.get("delivery_date"):
-        raise HTTPException(status_code=400, detail="Пожалуйста, исправьте накладную: укажите дату прибытия")
-    chat_id = get_chat_id_for_shipment(s)
-    if not chat_id:
+        raise HTTPException(status_code=400, detail="Пожалуйста, укажите дату прибытия в накладной")
+    chat_ids = get_chat_ids_for_shipment(s)
+    if not chat_ids:
         raise HTTPException(
             status_code=400,
             detail="У накладной нет клиента с Telegram. Уведомления можно отправлять только клиентам, зарегистрированным в боте.",
@@ -279,7 +323,7 @@ def notify_delivery(shipment_id: str):
         raise HTTPException(status_code=500, detail="Не удалось отправить уведомление")
     with get_db() as conn:
         conn.execute("UPDATE shipments SET delivery_notified = 1 WHERE id = ?", (shipment_id,))
-    log.info("Уведомление о доставке отправлено shipment_id=%s chat_id=%s", shipment_id, chat_id)
+    log.info("Уведомление о доставке отправлено shipment_id=%s", shipment_id)
     return {"ok": True}
 
 
@@ -288,7 +332,7 @@ class CalculatedUpdate(BaseModel):
 
 
 @router.patch("/{shipment_id}/calculated", response_model=ShipmentResponse)
-def update_calculated(shipment_id: str, data: CalculatedUpdate):
+def update_calculated(shipment_id: str, data: CalculatedUpdate, _admin=Depends(require_admin)):
     _get_shipment_by_id(shipment_id)
     with get_db() as conn:
         conn.execute("UPDATE shipments SET calculated = ? WHERE id = ?", (1 if data.calculated else 0, shipment_id))
@@ -296,7 +340,7 @@ def update_calculated(shipment_id: str, data: CalculatedUpdate):
 
 
 @router.delete("/{shipment_id}", status_code=204)
-def delete_shipment(shipment_id: str):
+def delete_shipment(shipment_id: str, _admin=Depends(require_admin)):
     _get_shipment_by_id(shipment_id)
     if _s3_available():
         try:
@@ -313,19 +357,69 @@ def delete_shipment(shipment_id: str):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Получатели уведомлений для накладной
+# ---------------------------------------------------------------------------
+
+@router.get("/{shipment_id}/recipients", response_model=List[RecipientResponse])
+def list_recipients(shipment_id: str, _admin=Depends(require_admin)):
+    _get_shipment_by_id(shipment_id)
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, shipment_id, chat_id, label FROM shipment_recipients WHERE shipment_id = ? ORDER BY label",
+            (shipment_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@router.post("/{shipment_id}/recipients", response_model=RecipientResponse, status_code=201)
+def add_recipient(shipment_id: str, data: RecipientAdd, _admin=Depends(require_admin)):
+    _get_shipment_by_id(shipment_id)
+    rec_id = str(uuid.uuid4())
+    with get_db() as conn:
+        try:
+            conn.execute(
+                "INSERT INTO shipment_recipients (id, shipment_id, chat_id, label) VALUES (?, ?, ?, ?)",
+                (rec_id, shipment_id, data.chat_id, data.label or "")
+            )
+        except Exception:
+            raise HTTPException(status_code=400, detail="Этот получатель уже добавлен")
+        row = conn.execute(
+            "SELECT id, shipment_id, chat_id, label FROM shipment_recipients WHERE id = ?",
+            (rec_id,)
+        ).fetchone()
+    return dict(row)
+
+
+@router.delete("/{shipment_id}/recipients/{rec_id}", status_code=204)
+def remove_recipient(shipment_id: str, rec_id: str, _admin=Depends(require_admin)):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM shipment_recipients WHERE id = ? AND shipment_id = ?",
+            (rec_id, shipment_id)
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Получатель не найден")
+        conn.execute("DELETE FROM shipment_recipients WHERE id = ?", (rec_id,))
+    return None
+
+
 @router.get("/{shipment_id}/file/{file_slot}")
-def get_file_download(shipment_id: str, file_slot: int):
-    """Редирект на скачивание файла (presigned URL для S3 или локальный путь для старых вложений)."""
+def get_file_download(
+    shipment_id: str,
+    file_slot: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Редирект на скачивание файла."""
     if file_slot not in (1, 2, 3):
         raise HTTPException(status_code=400, detail="Недопустимый слот файла")
     s = _get_shipment_by_id(shipment_id)
+    _check_shipment_access(s, current_user)
     key = s.get(f"file{file_slot}")
     if not key:
         raise HTTPException(status_code=404, detail="Файл не найден")
-    # S3-ключ (новые файлы хранятся только в S3)
     if key.startswith("shipments/") or key.startswith("shipment/"):
         from backend.services.s3_storage import get_presigned_url
         url = get_presigned_url(key)
         return RedirectResponse(url=url, status_code=302)
-    # Локальный путь (старые вложения до перехода на S3)
     return RedirectResponse(url=key, status_code=302)

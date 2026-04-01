@@ -9,7 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from backend.database import init_db, get_db_path
-from backend.routers import shipments, backup, clients, admin
+from backend.routers import shipments, backup, clients, admin, groups
+from backend.routers import auth as auth_router
 from backend.logging_config import setup_logging, get_logger
 
 # Логирование для сайта (backend)
@@ -65,10 +66,12 @@ app.add_middleware(
 
 init_db()
 
+app.include_router(auth_router.router)
 app.include_router(shipments.router)
 app.include_router(backup.router)
 app.include_router(clients.router)
 app.include_router(admin.router)
+app.include_router(groups.router)
 
 UPLOADS_DIR = Path(__file__).parent / "uploads"
 UPLOADS_DIR.mkdir(exist_ok=True)

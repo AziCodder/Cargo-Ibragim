@@ -1,4 +1,5 @@
 import os
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -12,22 +13,63 @@ BASE_DIR = Path(__file__).parent.parent
 UPLOADS_DIR = BASE_DIR / "uploads"
 
 
-def get_chat_id_for_shipment(shipment: dict) -> str | None:
-    """Возвращает chat_id для уведомления: из клиента накладной или fallback."""
-    client_id = shipment.get("client_id")
-    if client_id:
-        import sqlite3
-        db_path = BASE_DIR / "cargo.db"
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT telegram_chat_id FROM clients WHERE id = ?",
-            (client_id,),
-        ).fetchone()
+def get_chat_ids_for_shipment(shipment: dict) -> list[str]:
+    """
+    Возвращает список chat_id для уведомления:
+    1. clients.telegram_chat_id клиента
+    2. clients.group_chat_id клиента (если задан)
+    3. Все bot_sessions.telegram_chat_id для данного client_id
+    4. Все shipment_recipients.chat_id для данной накладной
+    5. Fallback на DEFAULT_CHAT_ID если список пустой
+    """
+    chat_ids = set()
+    db_path = BASE_DIR / "cargo.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        client_id = shipment.get("client_id")
+        if client_id:
+            row = conn.execute(
+                "SELECT telegram_chat_id, group_chat_id FROM clients WHERE id = ?",
+                (client_id,),
+            ).fetchone()
+            if row:
+                if row["telegram_chat_id"]:
+                    chat_ids.add(row["telegram_chat_id"])
+                if row["group_chat_id"]:
+                    chat_ids.add(row["group_chat_id"])
+            # Добавить все активные bot-сессии для этого клиента
+            sessions = conn.execute(
+                "SELECT telegram_chat_id FROM bot_sessions WHERE client_id = ?",
+                (client_id,),
+            ).fetchall()
+            for s in sessions:
+                if s["telegram_chat_id"]:
+                    chat_ids.add(s["telegram_chat_id"])
+
+        # Дополнительные получатели, прикреплённые к конкретной накладной
+        shipment_id = shipment.get("id")
+        if shipment_id:
+            recipients = conn.execute(
+                "SELECT chat_id FROM shipment_recipients WHERE shipment_id = ?",
+                (shipment_id,),
+            ).fetchall()
+            for r in recipients:
+                if r["chat_id"]:
+                    chat_ids.add(r["chat_id"])
+    finally:
         conn.close()
-        if row and row["telegram_chat_id"]:
-            return row["telegram_chat_id"]
-    return DEFAULT_CHAT_ID
+
+    if not chat_ids and DEFAULT_CHAT_ID:
+        chat_ids.add(DEFAULT_CHAT_ID)
+
+    return list(chat_ids)
+
+
+# Обратная совместимость — используется в некоторых местах
+def get_chat_id_for_shipment(shipment: dict) -> str | None:
+    ids = get_chat_ids_for_shipment(shipment)
+    return ids[0] if ids else None
 
 
 def _escape_html(text: str) -> str:
@@ -94,57 +136,50 @@ def _iter_attachments(shipment_id: str, s: dict):
                 continue
 
 
-def _get_file_paths(shipment_id: str, s: dict) -> list:
-    """Список путей к файлам для отправки (локальные или временные после скачивания из S3)."""
-    paths = []
-    for path, _ in _iter_attachments(shipment_id, s):
-        paths.append(path)
-    return paths
+def _send_to_chat(client: httpx.Client, chat_id: str, text: str, shipment: dict):
+    """Отправляет текст + вложения в один chat_id."""
+    url_msg = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    r = client.post(url_msg, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+    if r.status_code != 200:
+        return False
+    doc_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    # Собираем вложения один раз для каждого chat_id
+    for fp, name in _iter_attachments(shipment.get("id", ""), shipment):
+        try:
+            with open(fp, "rb") as f:
+                client.post(doc_url, data={"chat_id": chat_id}, files={"document": (name, f)})
+        finally:
+            if not str(fp).startswith(str(UPLOADS_DIR)):
+                try:
+                    os.unlink(fp)
+                except Exception:
+                    pass
+    return True
 
 
 def send_dispatch_notification(shipment: dict) -> bool:
-    chat_id = get_chat_id_for_shipment(shipment)
-    if not BOT_TOKEN or not chat_id:
+    chat_ids = get_chat_ids_for_shipment(shipment)
+    if not BOT_TOKEN or not chat_ids:
         return False
     text = _format_shipment_dispatch(shipment)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    any_ok = False
     with httpx.Client() as client:
-        r = client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-        if r.status_code != 200:
-            return False
-        for fp, name in _iter_attachments(shipment["id"], shipment):
-            doc_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            try:
-                with open(fp, "rb") as f:
-                    client.post(doc_url, data={"chat_id": chat_id}, files={"document": (name, f)})
-            finally:
-                if not str(fp).startswith(str(UPLOADS_DIR)):
-                    try:
-                        os.unlink(fp)
-                    except Exception:
-                        pass
-    return True
+        for chat_id in chat_ids:
+            ok = _send_to_chat(client, chat_id, text, shipment)
+            if ok:
+                any_ok = True
+    return any_ok
 
 
 def send_delivery_notification(shipment: dict) -> bool:
-    chat_id = get_chat_id_for_shipment(shipment)
-    if not BOT_TOKEN or not chat_id:
+    chat_ids = get_chat_ids_for_shipment(shipment)
+    if not BOT_TOKEN or not chat_ids:
         return False
     text = _format_shipment_delivery(shipment)
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    any_ok = False
     with httpx.Client() as client:
-        r = client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-        if r.status_code != 200:
-            return False
-        for fp, name in _iter_attachments(shipment["id"], shipment):
-            doc_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
-            try:
-                with open(fp, "rb") as f:
-                    client.post(doc_url, data={"chat_id": chat_id}, files={"document": (name, f)})
-            finally:
-                if not str(fp).startswith(str(UPLOADS_DIR)):
-                    try:
-                        os.unlink(fp)
-                    except Exception:
-                        pass
-    return True
+        for chat_id in chat_ids:
+            ok = _send_to_chat(client, chat_id, text, shipment)
+            if ok:
+                any_ok = True
+    return any_ok
