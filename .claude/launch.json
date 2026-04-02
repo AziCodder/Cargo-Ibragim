@@ -1,0 +1,25 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Frontend (Vite)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "frontend",
+      "port": 5173,
+      "autoPort": true
+    },
+    {
+      "name": "Backend (FastAPI / uvicorn)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/run-python.js", "backend"],
+      "port": 8800
+    },
+    {
+      "name": "Telegram Bot",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/run-python.js", "bot"],
+      "port": null
+    }
+  ]
+}
