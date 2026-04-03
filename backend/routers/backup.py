@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from backend.database import get_db_path
+from backend.database import get_db_path, init_db
 
 
 class RestoreS3Request(BaseModel):
@@ -133,6 +133,7 @@ def restore_from_s3(data: RestoreS3Request):
                 detail="S3 не настроен.",
             )
         result = do_restore(prefix)
+        init_db()
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -150,4 +151,5 @@ def restore_backup(filename: str):
     if not src.exists():
         raise HTTPException(status_code=404, detail="Резервная копия не найдена")
     shutil.copy2(src, DB_PATH)
+    init_db()
     return {"ok": True, "message": "База данных восстановлена"}

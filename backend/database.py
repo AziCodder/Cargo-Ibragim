@@ -48,6 +48,12 @@ def _migrate_clients(conn):
     if "delivery_notified" not in cols:
         conn.execute("ALTER TABLE shipments ADD COLUMN delivery_notified INTEGER NOT NULL DEFAULT 0")
 
+    # Миграция колонок shipments
+    if "calculated" not in cols:
+        conn.execute("ALTER TABLE shipments ADD COLUMN calculated INTEGER NOT NULL DEFAULT 0")
+    if "cashback" not in cols:
+        conn.execute("ALTER TABLE shipments ADD COLUMN cashback REAL NOT NULL DEFAULT 0")
+
     # Миграция: group_chat_id для клиентов
     client_cols = [r[1] for r in conn.execute("PRAGMA table_info(clients)").fetchall()]
     if "group_chat_id" not in client_cols:

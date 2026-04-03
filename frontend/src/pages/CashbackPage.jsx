@@ -61,6 +61,7 @@ export default function CashbackPage() {
   const [shipments, setShipments] = useState([]);
   const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Локальные галочки (Set из id)
@@ -77,14 +78,15 @@ export default function CashbackPage() {
 
   const load = useCallback(() => {
     setLoading(true);
+    setLoadError('');
     Promise.all([shipmentsApi.listCashback(), clientsApi.list()])
       .then(([shRes, clRes]) => {
         const sh = shRes.data || [];
         setShipments(sh);
         setClients(clRes.data || []);
-        // Инициализируем локальные галочки из БД
         setLocalChecked(new Set(sh.filter((s) => s.calculated).map((s) => s.id)));
       })
+      .catch((e) => setLoadError(e.response?.data?.detail || 'Ошибка загрузки данных'))
       .finally(() => setLoading(false));
   }, []);
 
@@ -245,6 +247,9 @@ export default function CashbackPage() {
         </div>
       )}
 
+      {loadError && (
+        <p style={{ color: 'var(--danger)', marginBottom: '1rem' }}>Ошибка: {loadError}</p>
+      )}
       {loading ? (
         <p>Загрузка...</p>
       ) : (

@@ -60,7 +60,7 @@ export default function BackupPage() {
       } else {
         await backupApi.restore(item.filename);
       }
-      setMessage('База данных восстановлена. Рекомендуется перезапустить сервер.');
+      setMessage('База данных успешно восстановлена.');
     } catch (e) {
       setError(e.response?.data?.detail || 'Ошибка восстановления');
     } finally {
