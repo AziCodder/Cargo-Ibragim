@@ -24,6 +24,8 @@ export default function NavBar({ showBack, backTo }) {
           <Link to="/users" className="btn">Пользователи</Link>
           <Link to="/groups" className="btn">Группы</Link>
           <Link to="/shipments/new" className="btn btn-primary">Создать накладную</Link>
+          <Link to="/backup" className="btn">Бэкап</Link>
+          <Link to="/logs" className="btn">Логи</Link>
         </>
       )}
       <button

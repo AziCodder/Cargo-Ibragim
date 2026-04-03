@@ -10,6 +10,8 @@ import UsersPage from './pages/UsersPage';
 import GroupsPage from './pages/GroupsPage';
 import ShipmentDetail from './pages/ShipmentDetail';
 import CreateShipment from './pages/CreateShipment';
+import BackupPage from './pages/BackupPage';
+import LogsPage from './pages/LogsPage';
 import './App.css';
 
 function App() {
@@ -27,6 +29,8 @@ function App() {
             <Route path="/groups" element={<ProtectedRoute adminOnly><GroupsPage /></ProtectedRoute>} />
             <Route path="/shipments/new" element={<ProtectedRoute adminOnly><CreateShipment /></ProtectedRoute>} />
             <Route path="/shipments/:id" element={<ProtectedRoute><ShipmentDetail /></ProtectedRoute>} />
+            <Route path="/backup" element={<ProtectedRoute adminOnly><BackupPage /></ProtectedRoute>} />
+            <Route path="/logs" element={<ProtectedRoute adminOnly><LogsPage /></ProtectedRoute>} />
           </Routes>
         </div>
       </BrowserRouter>

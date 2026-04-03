@@ -113,7 +113,7 @@ export default function UsersPage() {
       <h2 style={{ marginBottom: '1rem' }}>Пользователи</h2>
 
       {/* Форма создания */}
-      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', padding: '1.25rem', marginBottom: '1.5rem' }}>
+      <div style={{ background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: '8px', padding: '1.25rem', marginBottom: '1.5rem' }}>
         <h3 style={{ marginBottom: '1rem', fontSize: '1rem' }}>Создать пользователя</h3>
         <form onSubmit={handleCreate}>
           <div className="form-row">
@@ -221,7 +221,7 @@ export default function UsersPage() {
           onClick={(e) => { if (e.target === e.currentTarget) closeEdit(); }}
         >
           <div style={{
-            background: 'var(--surface)', border: '1px solid var(--border)',
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
             borderRadius: '10px', padding: '1.5rem', width: '100%', maxWidth: '400px',
           }}>
             <h3 style={{ marginBottom: '1rem', fontSize: '1rem' }}>
