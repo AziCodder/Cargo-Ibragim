@@ -150,15 +150,14 @@ def get_shipment_by_tracking(tracking: str, telegram_chat_id: str):
 
 @router.get("/cashback", response_model=List[ShipmentResponse])
 def list_cashback_shipments(_admin=Depends(require_admin)):
-    """Только для admin: накладные «в дороге» и «доставлено» для расчёта по кэшбеку."""
+    """Только для admin: накладные с датой получения для расчёта по кэшбеку."""
     with get_db() as conn:
         rows = conn.execute(
             """SELECT s.*, c.full_name as client_name
                FROM shipments s
                LEFT JOIN clients c ON s.client_id = c.id
-               WHERE s.status IN (?, ?)
+               WHERE s.delivery_date IS NOT NULL AND s.delivery_date != ''
                ORDER BY s.calculated ASC, s.delivery_date ASC, s.created_at ASC""",
-            (Status.IN_TRANSIT.value, Status.DELIVERED.value),
         ).fetchall()
     return [row_to_shipment(r) for r in rows]
 
@@ -404,13 +403,60 @@ def remove_recipient(shipment_id: str, rec_id: str, _admin=Depends(require_admin
     return None
 
 
+@router.get("/{shipment_id}/file/{file_slot}/url")
+def get_file_url(
+    shipment_id: str,
+    file_slot: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Возвращает URL для скачивания файла (JSON, без редиректа)."""
+    if file_slot not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="Недопустимый слот файла")
+    s = _get_shipment_by_id(shipment_id)
+    _check_shipment_access(s, current_user)
+    key = s.get(f"file{file_slot}")
+    if not key:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    if key.startswith("shipments/") or key.startswith("shipment/"):
+        from backend.services.s3_storage import get_presigned_url
+        url = get_presigned_url(key)
+    else:
+        url = key
+    return {"url": url}
+
+
+@router.delete("/{shipment_id}/file/{file_slot}", response_model=ShipmentResponse)
+def delete_file(
+    shipment_id: str,
+    file_slot: int,
+    _admin=Depends(require_admin),
+):
+    """Удаляет файл из слота накладной."""
+    if file_slot not in (1, 2, 3):
+        raise HTTPException(status_code=400, detail="Недопустимый слот файла")
+    s = _get_shipment_by_id(shipment_id)
+    key = s.get(f"file{file_slot}")
+    if not key:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    if _s3_available() and (key.startswith("shipments/") or key.startswith("shipment/")):
+        try:
+            from backend.services.s3_storage import delete_file_by_key
+            delete_file_by_key(key)
+        except Exception:
+            pass
+    with get_db() as conn:
+        conn.execute(f"UPDATE shipments SET file{file_slot}=NULL WHERE id=?", (shipment_id,))
+    log.info("Удалён файл slot=%s shipment_id=%s", file_slot, shipment_id)
+    return _get_shipment_by_id(shipment_id)
+
+
 @router.get("/{shipment_id}/file/{file_slot}")
 def get_file_download(
     shipment_id: str,
     file_slot: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Редирект на скачивание файла."""
+    """Редирект на скачивание файла (оставлен для обратной совместимости)."""
     if file_slot not in (1, 2, 3):
         raise HTTPException(status_code=400, detail="Недопустимый слот файла")
     s = _get_shipment_by_id(shipment_id)

@@ -79,6 +79,12 @@ def get_presigned_url(s3_key: str, expires_in: int = 3600) -> str:
     )
 
 
+def delete_file_by_key(key: str) -> None:
+    """Удаляет один файл из S3 по ключу."""
+    client = _get_s3_client()
+    client.delete_object(Bucket=S3_BUCKET, Key=key)
+
+
 def delete_shipment_files(shipment_id: str) -> None:
     """Удаляет все файлы накладной из S3."""
     client = _get_s3_client()

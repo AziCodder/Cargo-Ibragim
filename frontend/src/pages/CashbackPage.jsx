@@ -306,7 +306,7 @@ export default function CashbackPage() {
 
           {filtered.length === 0 && !loading && (
             <p style={{ padding: '1rem', color: 'var(--text-muted)' }}>
-              {shipments.length === 0 ? 'Нет доставленных накладных.' : 'Нет записей по выбранным фильтрам.'}
+              {shipments.length === 0 ? 'Нет накладных с датой получения.' : 'Нет записей по выбранным фильтрам.'}
             </p>
           )}
         </div>

@@ -192,17 +192,24 @@ def update_user(user_id: str, data: UserUpdate, _admin=Depends(require_admin)):
             raise HTTPException(status_code=404, detail="Пользователь не найден")
         if data.role is not None and data.role not in ("admin", "client"):
             raise HTTPException(status_code=400, detail="Роль должна быть 'admin' или 'client'")
+        new_username = data.username.strip() if data.username and data.username.strip() else row["username"]
+        if new_username != row["username"]:
+            taken = conn.execute(
+                "SELECT 1 FROM users WHERE username = ? AND id != ?", (new_username, user_id)
+            ).fetchone()
+            if taken:
+                raise HTTPException(status_code=400, detail="Пользователь с таким логином уже существует")
         new_hash = hash_password(data.password) if data.password else row["password_hash"]
         new_role = data.role if data.role is not None else row["role"]
         new_client_id = data.client_id if data.client_id is not None else row["client_id"]
         conn.execute(
-            "UPDATE users SET password_hash=?, role=?, client_id=? WHERE id=?",
-            (new_hash, new_role, new_client_id, user_id),
+            "UPDATE users SET username=?, password_hash=?, role=?, client_id=? WHERE id=?",
+            (new_username, new_hash, new_role, new_client_id, user_id),
         )
-    log.info("Обновлён пользователь id=%s", user_id)
+    log.info("Обновлён пользователь id=%s username=%s", user_id, new_username)
     return {
         "id": user_id,
-        "username": row["username"],
+        "username": new_username,
         "role": new_role,
         "client_id": new_client_id,
         "created_at": row["created_at"],

@@ -165,6 +165,25 @@ export default function ShipmentDetail() {
     loadRecipients();
   };
 
+  const handleDownloadFile = async (slot) => {
+    try {
+      const res = await shipmentsApi.getFileUrl(id, slot);
+      window.open(res.data.url, '_blank');
+    } catch (e) {
+      alert(e.response?.data?.detail || 'Ошибка получения файла');
+    }
+  };
+
+  const handleDeleteFile = async (slot) => {
+    if (!confirm(`Удалить файл ${slot}?`)) return;
+    try {
+      const res = await shipmentsApi.deleteFile(id, slot);
+      setShipment(res.data);
+    } catch (e) {
+      alert(e.response?.data?.detail || 'Ошибка удаления файла');
+    }
+  };
+
   const handleFileUpload = (e) => {
     const files = e.target.files;
     if (!files?.length) return;
@@ -234,7 +253,9 @@ export default function ShipmentDetail() {
           <label>Файлы</label>
           <div className="file-links">
             {[1, 2, 3].filter((i) => shipment[`file${i}`]).map((i) => (
-              <a key={i} href={`/api/shipments/${id}/file/${i}`} target="_blank" rel="noreferrer">Файл {i}</a>
+              <button key={i} className="btn" onClick={() => handleDownloadFile(i)} style={{ padding: '0.2rem 0.6rem', fontSize: '0.85rem' }}>
+                Файл {i}
+              </button>
             ))}
             {![1, 2, 3].some((i) => shipment[`file${i}`]) && (
               <span style={{ color: 'var(--text-muted)' }}>Нет файлов</span>
@@ -276,8 +297,20 @@ export default function ShipmentDetail() {
         <label>Файлы</label>
         <div className="file-links">
           {[1, 2, 3].filter((i) => shipment[`file${i}`]).map((i) => (
-            <a key={i} href={`/api/shipments/${id}/file/${i}`} target="_blank" rel="noreferrer">Файл {i}</a>
+            <span key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '0.2rem' }}>
+              <button className="btn" onClick={() => handleDownloadFile(i)} style={{ padding: '0.2rem 0.6rem', fontSize: '0.85rem' }}>
+                Файл {i}
+              </button>
+              <button
+                onClick={() => handleDeleteFile(i)}
+                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--danger)', fontWeight: 'bold', fontSize: '1.1rem', lineHeight: 1, padding: '0 2px' }}
+                title="Удалить файл"
+              >×</button>
+            </span>
           ))}
+          {![1, 2, 3].some((i) => shipment[`file${i}`]) && (
+            <span style={{ color: 'var(--text-muted)' }}>Нет файлов</span>
+          )}
         </div>
         <input type="file" multiple onChange={handleFileUpload} style={{ marginTop: '0.5rem' }} />
       </div>

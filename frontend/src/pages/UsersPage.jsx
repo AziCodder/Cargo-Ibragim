@@ -12,6 +12,12 @@ export default function UsersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
+  // Редактирование пользователя
+  const [editUser, setEditUser] = useState(null); // { id, username }
+  const [editForm, setEditForm] = useState({ username: '', password: '' });
+  const [editError, setEditError] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+
   const load = () => {
     setLoading(true);
     Promise.all([adminApi.listUsers(), clientsApi.list()])
@@ -55,6 +61,43 @@ export default function UsersPage() {
       load();
     } catch (err) {
       alert(err.response?.data?.detail || 'Ошибка удаления');
+    }
+  };
+
+  const openEdit = (u) => {
+    setEditUser(u);
+    setEditForm({ username: u.username, password: '' });
+    setEditError('');
+  };
+
+  const closeEdit = () => {
+    setEditUser(null);
+    setEditError('');
+  };
+
+  const handleEdit = async (e) => {
+    e.preventDefault();
+    if (!editForm.username.trim()) {
+      setEditError('Логин не может быть пустым');
+      return;
+    }
+    if (!editForm.password && editForm.username.trim() === editUser.username) {
+      setEditError('Нет изменений для сохранения');
+      return;
+    }
+    setEditSaving(true);
+    setEditError('');
+    try {
+      await adminApi.updateUser(editUser.id, {
+        username: editForm.username.trim(),
+        password: editForm.password || undefined,
+      });
+      closeEdit();
+      load();
+    } catch (err) {
+      setEditError(err.response?.data?.detail || 'Ошибка сохранения');
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -142,7 +185,14 @@ export default function UsersPage() {
                   <td>{ROLE_LABELS[u.role] || u.role}</td>
                   <td>{getClientName(u.client_id)}</td>
                   <td>{u.created_at ? new Date(u.created_at).toLocaleDateString('ru-RU') : '—'}</td>
-                  <td>
+                  <td style={{ display: 'flex', gap: '0.5rem' }}>
+                    <button
+                      className="btn"
+                      onClick={() => openEdit(u)}
+                      style={{ padding: '0.25rem 0.75rem', fontSize: '0.85rem' }}
+                    >
+                      Изменить
+                    </button>
                     <button
                       className="btn btn-danger"
                       onClick={() => handleDelete(u.id, u.username)}
@@ -158,6 +208,56 @@ export default function UsersPage() {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Модальное окно редактирования */}
+      {editUser && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+          }}
+          onClick={(e) => { if (e.target === e.currentTarget) closeEdit(); }}
+        >
+          <div style={{
+            background: 'var(--surface)', border: '1px solid var(--border)',
+            borderRadius: '10px', padding: '1.5rem', width: '100%', maxWidth: '400px',
+          }}>
+            <h3 style={{ marginBottom: '1rem', fontSize: '1rem' }}>
+              Изменить пользователя <em>{editUser.username}</em>
+            </h3>
+            <form onSubmit={handleEdit}>
+              <div className="form-group" style={{ marginBottom: '0.75rem' }}>
+                <label>Новый логин</label>
+                <input
+                  type="text"
+                  value={editForm.username}
+                  onChange={(e) => setEditForm((f) => ({ ...f, username: e.target.value }))}
+                  autoComplete="off"
+                />
+              </div>
+              <div className="form-group" style={{ marginBottom: '1rem' }}>
+                <label>Новый пароль <span style={{ color: 'var(--text-muted)', fontWeight: 'normal' }}>(оставьте пустым, чтобы не менять)</span></label>
+                <input
+                  type="password"
+                  value={editForm.password}
+                  onChange={(e) => setEditForm((f) => ({ ...f, password: e.target.value }))}
+                  placeholder="новый пароль"
+                  autoComplete="new-password"
+                />
+              </div>
+              {editError && <p style={{ color: 'var(--danger)', marginBottom: '0.75rem', fontSize: '0.9rem' }}>{editError}</p>}
+              <div style={{ display: 'flex', gap: '0.75rem' }}>
+                <button className="btn btn-primary" type="submit" disabled={editSaving}>
+                  {editSaving ? 'Сохранение...' : 'Сохранить'}
+                </button>
+                <button className="btn" type="button" onClick={closeEdit} disabled={editSaving}>
+                  Отмена
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </>

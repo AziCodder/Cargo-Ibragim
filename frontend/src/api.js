@@ -56,6 +56,8 @@ export const shipmentsApi = {
   notifyDispatch: (id) => api.post(`/shipments/${id}/notify-dispatch`),
   notifyDelivery: (id) => api.post(`/shipments/${id}/notify-delivery`),
   updateCalculated: (id, calculated) => api.patch(`/shipments/${id}/calculated`, { calculated }),
+  getFileUrl: (id, slot) => api.get(`/shipments/${id}/file/${slot}/url`),
+  deleteFile: (id, slot) => api.delete(`/shipments/${id}/file/${slot}`),
 };
 
 export const backupApi = {
