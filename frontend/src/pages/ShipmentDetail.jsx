@@ -187,18 +187,16 @@ export default function ShipmentDetail() {
   const handleFileUpload = (e) => {
     const files = e.target.files;
     if (!files?.length) return;
-    const existing = [shipment.file1, shipment.file2, shipment.file3].filter(Boolean);
-    const freeSlots = 3 - existing.length;
-    if (freeSlots <= 0) {
-      alert('Уже загружено максимальное количество файлов (3).');
+    const freeSlotNumbers = [1, 2, 3].filter((i) => !shipment[`file${i}`]);
+    if (freeSlotNumbers.length === 0) {
+      alert('Уже загружено 3 файла. Удалите лишние, чтобы добавить новые.');
       e.target.value = '';
       return;
     }
     const fd = new FormData();
-    const toAdd = Math.min(freeSlots, files.length);
+    const toAdd = Math.min(freeSlotNumbers.length, files.length);
     for (let i = 0; i < toAdd; i++) {
-      const slot = existing.length + 1 + i;
-      fd.append(`file${slot}`, files[i]);
+      fd.append(`file${freeSlotNumbers[i]}`, files[i]);
     }
     shipmentsApi.uploadFiles(id, fd).then((r) => setShipment(r.data));
     e.target.value = '';
