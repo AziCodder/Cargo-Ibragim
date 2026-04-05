@@ -49,7 +49,7 @@ def _get_s3_client():
     return boto3.client("s3", **client_kw)
 
 
-AUTO_BACKUP_PREFIX = "backups/auto"
+AUTO_BACKUP_PREFIX = "backups/new"
 
 
 def upload_auto_backup_to_s3() -> None:

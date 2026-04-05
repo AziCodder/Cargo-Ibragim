@@ -148,12 +148,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏳ <b>Ваша заявка на регистрацию уже отправлена!</b>\n\n"
             "Ожидайте — администратор рассмотрит её и пришлёт данные для входа.",
             parse_mode="HTML",
+            reply_markup=REPLY_KEYBOARD,
         )
         return ConversationHandler.END
     elif client_status == "approved":
         await update.message.reply_text(
             "ℹ️ Вы зарегистрированы, но сессия не найдена.\n"
             "Для входа используйте /login",
+            reply_markup=REPLY_KEYBOARD,
         )
         return ConversationHandler.END
 
@@ -163,6 +165,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Для регистрации введите ваши данные.\n"
         "Сначала напишите ваше <b>ФИО</b> (Фамилия Имя Отчество):",
         parse_mode="HTML",
+        reply_markup=REPLY_KEYBOARD,
     )
     return REG_NAME
 

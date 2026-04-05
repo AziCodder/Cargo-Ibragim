@@ -9,6 +9,7 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DEFAULT_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").rstrip("/")
 BASE_DIR = Path(__file__).parent.parent
 UPLOADS_DIR = BASE_DIR / "uploads"
 
@@ -81,18 +82,27 @@ def _shipping_type_label(st: str) -> str:
     return labels.get(st or "", (st or "").replace("_", "-"))
 
 
+def _shipment_link(s: dict) -> str:
+    sid = s.get("id", "")
+    if FRONTEND_URL and sid:
+        return f'<a href="{FRONTEND_URL}/shipments/{sid}">открыть накладную</a>'
+    return "—"
+
+
 def _format_shipment_dispatch(s: dict) -> str:
     lines = [
         "📦 <b>Уведомление об отправке</b>",
         "",
         f"<b>Трекинг:</b> {_escape_html(s.get('tracking', ''))}",
-        f"<b>Дата отправления:</b> {_escape_html(str(s.get('dispatch_date', '')))}",
+        f"<b>Дата отправки:</b> {_escape_html(str(s.get('dispatch_date', '')))}",
         f"<b>Срок доставки:</b> {_escape_html(_shipping_type_label(s.get('shipping_type', '')))}",
         f"<b>Вес:</b> {s.get('weight', 0)} кг",
         f"<b>Сумма к оплате:</b> {s.get('amount_to_pay', 0)}",
         "",
         f"<b>Список товара:</b>",
         _escape_html(s.get("product_list", "") or "—"),
+        "",
+        f"<b>ссылка на накладную:</b> {_shipment_link(s)}",
     ]
     return "\n".join(lines)
 
@@ -107,6 +117,8 @@ def _format_shipment_delivery(s: dict) -> str:
         "",
         f"<b>Список товара:</b>",
         _escape_html(s.get("product_list", "") or "—"),
+        "",
+        f"<b>ссылка на накладную:</b> {_shipment_link(s)}",
     ]
     return "\n".join(lines)
 
