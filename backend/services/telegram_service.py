@@ -91,7 +91,7 @@ def _shipment_link(s: dict) -> str:
 
 def _format_shipment_dispatch(s: dict) -> str:
     lines = [
-        "📦 <b>Уведомление об отправке</b>",
+        "📦 <b>Ваша посылка отправлена, ожидайте!</b>",
         "",
         f"<b>Трекинг:</b> {_escape_html(s.get('tracking', ''))}",
         f"<b>Дата отправки:</b> {_escape_html(str(s.get('dispatch_date', '')))}",
@@ -102,14 +102,14 @@ def _format_shipment_dispatch(s: dict) -> str:
         f"<b>Список товара:</b>",
         _escape_html(s.get("product_list", "") or "—"),
         "",
-        f"<b>ссылка на накладную:</b> {_shipment_link(s)}",
+        f"<b>Накладная:</b> {_shipment_link(s)}",
     ]
     return "\n".join(lines)
 
 
 def _format_shipment_delivery(s: dict) -> str:
     lines = [
-        "✅ <b>Уведомление о прибытии</b>",
+        "✅ <b>Ваша посылка прибыла, можете забирать!</b>",
         "",
         f"<b>Трекинг:</b> {_escape_html(s.get('tracking', ''))}",
         f"<b>Вес:</b> {s.get('weight', 0)} кг",
@@ -118,7 +118,7 @@ def _format_shipment_delivery(s: dict) -> str:
         f"<b>Список товара:</b>",
         _escape_html(s.get("product_list", "") or "—"),
         "",
-        f"<b>ссылка на накладную:</b> {_shipment_link(s)}",
+        f"<b>Накладная:</b> {_shipment_link(s)}",
     ]
     return "\n".join(lines)
 
